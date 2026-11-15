@@ -1,10 +1,15 @@
 -- DB CARDOSO: identity, organization membership and authorization foundation.
--- Apply using Supabase SQL Editor or `supabase db push` after reviewing this migration.
--- No organization, user, branch, or commercial sample data is inserted.
+-- Review before applying with Supabase SQL Editor or `supabase db push`.
+-- No organization, branch, or commercial sample data is inserted.
 
 begin;
 
 create extension if not exists pgcrypto with schema extensions;
+
+-- Keep authorization helpers outside PostgREST's normally exposed `public` schema.
+create schema if not exists private;
+revoke all on schema private from public, anon, authenticated;
+grant usage on schema private to authenticated;
 
 do $$ begin
   create type public.membership_status as enum ('invited', 'active', 'suspended');
@@ -76,8 +81,7 @@ create table if not exists public.memberships (
     foreign key (role_id, organization_id) references public.roles(id, organization_id) on delete restrict
 );
 
--- Explicit branch grants are required so membership in an organization does not
--- automatically expose every branch. A user can have multiple branch grants.
+-- Explicit grants prevent organization membership alone from granting all branches.
 create table if not exists public.branch_memberships (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null,
@@ -106,9 +110,10 @@ returns trigger
 language plpgsql
 set search_path = ''
 as $$ begin
-  new.updated_at := now();
+  new.updated_at := pg_catalog.now();
   return new;
 end $$;
+revoke all on function public.set_updated_at() from public, anon, authenticated;
 
 create or replace function public.create_profile_for_auth_user()
 returns trigger
@@ -119,12 +124,16 @@ as $$ begin
   insert into public.profiles (user_id) values (new.id) on conflict (user_id) do nothing;
   return new;
 end $$;
-
 revoke all on function public.create_profile_for_auth_user() from public, anon, authenticated;
 drop trigger if exists on_auth_user_created_profile on auth.users;
 create trigger on_auth_user_created_profile
   after insert on auth.users
   for each row execute function public.create_profile_for_auth_user();
+
+-- Also creates empty profiles for Auth users that existed before this migration.
+insert into public.profiles (user_id)
+select u.id from auth.users as u
+on conflict (user_id) do nothing;
 
 do $$ declare table_name text;
 begin
@@ -134,8 +143,9 @@ begin
   end loop;
 end $$;
 
--- SECURITY DEFINER helpers avoid recursive membership/role RLS checks.
-create or replace function public.is_organization_member(p_organization_id uuid)
+-- SECURITY DEFINER avoids recursive RLS checks. Every referenced object is schema-qualified,
+-- and the empty search_path prevents object-shadowing attacks.
+create or replace function private.is_organization_member(p_organization_id uuid)
 returns boolean
 language sql
 stable
@@ -143,14 +153,14 @@ security definer
 set search_path = ''
 as $$
   select exists (
-    select 1 from public.memberships m
+    select 1 from public.memberships as m
     where m.organization_id = p_organization_id
       and m.user_id = (select auth.uid())
       and m.status = 'active'
   );
 $$;
 
-create or replace function public.has_organization_permission(p_organization_id uuid, p_permission text)
+create or replace function private.has_organization_permission(p_organization_id uuid, p_permission text)
 returns boolean
 language sql
 stable
@@ -159,9 +169,9 @@ set search_path = ''
 as $$
   select exists (
     select 1
-    from public.memberships m
-    join public.role_permissions rp on rp.role_id = m.role_id
-    join public.permissions p on p.id = rp.permission_id
+    from public.memberships as m
+    join public.role_permissions as rp on rp.role_id = m.role_id
+    join public.permissions as p on p.id = rp.permission_id
     where m.organization_id = p_organization_id
       and m.user_id = (select auth.uid())
       and m.status = 'active'
@@ -169,7 +179,7 @@ as $$
   );
 $$;
 
-create or replace function public.can_access_branch(p_branch_id uuid, p_permission text)
+create or replace function private.can_access_branch(p_branch_id uuid, p_permission text)
 returns boolean
 language sql
 stable
@@ -178,10 +188,10 @@ set search_path = ''
 as $$
   select exists (
     select 1
-    from public.branch_memberships bm
-    join public.memberships m on m.id = bm.membership_id and m.organization_id = bm.organization_id
-    join public.role_permissions rp on rp.role_id = m.role_id
-    join public.permissions p on p.id = rp.permission_id
+    from public.branch_memberships as bm
+    join public.memberships as m on m.id = bm.membership_id and m.organization_id = bm.organization_id
+    join public.role_permissions as rp on rp.role_id = m.role_id
+    join public.permissions as p on p.id = rp.permission_id
     where bm.branch_id = p_branch_id
       and m.user_id = (select auth.uid())
       and m.status = 'active'
@@ -189,12 +199,12 @@ as $$
   );
 $$;
 
-revoke all on function public.is_organization_member(uuid) from public;
-revoke all on function public.has_organization_permission(uuid, text) from public;
-revoke all on function public.can_access_branch(uuid, text) from public;
-grant execute on function public.is_organization_member(uuid) to authenticated;
-grant execute on function public.has_organization_permission(uuid, text) to authenticated;
-grant execute on function public.can_access_branch(uuid, text) to authenticated;
+revoke all on function private.is_organization_member(uuid) from public, anon, authenticated;
+revoke all on function private.has_organization_permission(uuid, text) from public, anon, authenticated;
+revoke all on function private.can_access_branch(uuid, text) from public, anon, authenticated;
+grant execute on function private.is_organization_member(uuid) to authenticated;
+grant execute on function private.has_organization_permission(uuid, text) to authenticated;
+grant execute on function private.can_access_branch(uuid, text) to authenticated;
 
 alter table public.organizations enable row level security;
 alter table public.branches enable row level security;
@@ -205,7 +215,6 @@ alter table public.permissions enable row level security;
 alter table public.role_permissions enable row level security;
 alter table public.branch_memberships enable row level security;
 
--- Remove broad defaults, then expose only the minimum read/profile-self-update grants.
 revoke all on public.organizations, public.branches, public.profiles, public.memberships,
   public.roles, public.permissions, public.role_permissions, public.branch_memberships from anon, authenticated;
 grant select on public.organizations, public.branches, public.profiles, public.memberships,
@@ -213,12 +222,12 @@ grant select on public.organizations, public.branches, public.profiles, public.m
 grant update (display_name, avatar_url) on public.profiles to authenticated;
 
 create policy organizations_read_member on public.organizations
-  for select to authenticated using (public.is_organization_member(id));
+  for select to authenticated using (private.is_organization_member(id));
 
 create policy branches_read_granted_branch on public.branches
   for select to authenticated using (
-    public.can_access_branch(id, 'branches.read')
-    or public.has_organization_permission(organization_id, 'branches.read_all')
+    private.can_access_branch(id, 'branches.read')
+    or private.has_organization_permission(organization_id, 'branches.read_all')
   );
 
 create policy profiles_read_self on public.profiles
@@ -230,39 +239,39 @@ create policy profiles_update_self on public.profiles
 create policy memberships_read_self_or_manager on public.memberships
   for select to authenticated using (
     user_id = (select auth.uid())
-    or public.has_organization_permission(organization_id, 'memberships.read')
+    or private.has_organization_permission(organization_id, 'memberships.read')
   );
 
 create policy roles_read_member on public.roles
   for select to authenticated using (
-    public.has_organization_permission(organization_id, 'roles.read')
+    private.has_organization_permission(organization_id, 'roles.read')
   );
 
+-- Permission codes are a global, non-secret catalog; clients have read-only access.
 create policy permissions_read_authenticated on public.permissions
   for select to authenticated using (true);
 
 create policy role_permissions_read_authorized on public.role_permissions
   for select to authenticated using (
     exists (
-      select 1 from public.roles r
+      select 1 from public.roles as r
       where r.id = role_id
-        and public.has_organization_permission(r.organization_id, 'roles.read')
+        and private.has_organization_permission(r.organization_id, 'roles.read')
     )
   );
 
 create policy branch_memberships_read_self_or_manager on public.branch_memberships
   for select to authenticated using (
     exists (
-      select 1 from public.memberships m
+      select 1 from public.memberships as m
       where m.id = membership_id
         and m.user_id = (select auth.uid())
         and m.status = 'active'
     )
-    or public.has_organization_permission(organization_id, 'memberships.read')
+    or private.has_organization_permission(organization_id, 'memberships.read')
   );
 
--- No client INSERT/DELETE or role/membership UPDATE policies are intentionally
--- present. Provisioning and privileged role changes must be done through a
--- trusted server/administrative process, never by browser-provided role fields.
+-- No client INSERT/DELETE or role/membership UPDATE policies are present.
+-- Provisioning and role changes must use a trusted backend/administrative process.
 
 commit;

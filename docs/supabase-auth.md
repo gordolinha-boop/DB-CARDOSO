@@ -4,7 +4,7 @@
 
 Esta etapa prepara o cliente Supabase, serviços/contexto de autenticação e uma migration SQL de identidade e autorização. Ela **não cria um projeto Supabase**, não executa a migration e não configura login na interface existente. Sem as variáveis públicas, o dashboard atual continua renderizando e o contexto informa `configuration-error`.
 
-Nenhuma organização, filial, conta de usuário ou dado comercial fictício foi inserido. A migration cria somente estrutura e a trigger que cria um perfil vazio quando o Supabase Auth cria um usuário.
+Nenhuma organização, filial, conta de usuário ou dado comercial fictício foi inserido. A migration cria somente estrutura e perfis vazios para usuários já existentes e para novos usuários criados pelo Supabase Auth.
 
 ## Modelo de dados
 
@@ -15,9 +15,9 @@ Nenhuma organização, filial, conta de usuário ou dado comercial fictício foi
 - `permissions`: catálogo global de códigos de permissão.
 - `role_permissions`: permissões concedidas a cada função.
 - `memberships`: associação usuário-organização e função/status.
-- `branch_memberships`: concessão explícita de acesso a filiais. É adicional às entidades solicitadas para que pertencer à organização não libere automaticamente todas as filiais.
+- `branch_memberships`: concessão explícita de acesso a filiais, para que o vínculo com a organização não libere todas as filiais.
 
-As relações usam UUID, FKs compostas para impedir misturar filial/função de uma empresa com associação de outra, chaves únicas e índices para consultas usuais.
+As relações usam UUID, FKs compostas para impedir misturar filial/função de uma empresa com associação de outra, chaves únicas e índices.
 
 ## Configuração local
 
@@ -26,43 +26,32 @@ As relações usam UUID, FKs compostas para impedir misturar filial/função de 
 3. `.env.local`, `.env` e demais variantes locais estão ignorados pelo Git. Não coloque `service_role`, secret key, senha ou chave privada em variável `VITE_*`.
 4. Instale dependências com `npm install`.
 
-Variáveis esperadas:
+## Revisão e aplicação manual da migration
 
-- `VITE_SUPABASE_URL`: URL pública do projeto Supabase.
-- `VITE_SUPABASE_PUBLISHABLE_KEY`: chave publicável para uso no navegador. Ela não substitui RLS.
+A migration está em `supabase/migrations/20261115000100_identity_access_control.sql`. **Ela ainda não foi aplicada.** Antes de aplicar:
 
-## Aplicar a migration manualmente
+1. Confirme Supabase Dashboard → API → Exposed schemas: mantenha `private` fora da lista exposta ao PostgREST (por padrão, exponha somente os schemas necessários, normalmente `public`).
+2. No Supabase Dashboard → SQL Editor, revise e execute o SQL somente após aprovação.
+3. Confira RLS habilitado nas oito tabelas e as permissões no Table Editor.
+4. Teste com dois usuários e organizações separados antes de dados reais.
 
-1. Abra Supabase Dashboard → SQL Editor.
-2. Revise e execute o conteúdo de `supabase/migrations/20261115000100_identity_access_control.sql`.
-3. Confira as tabelas em Database → Table Editor e confirme RLS habilitado em todas as oito tabelas.
-4. Faça testes com dois usuários de teste e organizações isoladas antes de usar dados reais. Não considere autorização validada apenas pelo sucesso da migration.
-
-A migration deliberadamente não oferece INSERT/DELETE/UPDATE de associações, funções ou permissões ao cliente autenticado. Portanto, ainda é necessária uma estratégia de provisionamento confiável (backend/Edge Function com validação e segredo mantido exclusivamente no servidor) para criar organizações, filiais e convites. Nunca use a chave service role na aplicação React.
-
-## Auth frontend preparado
-
-- `src/lib/supabase/client.ts`: cliente Supabase tipado e opcionalmente configurado.
-- `src/services/authService.ts`: login, logout, recuperação e atualização de senha; lança erro se a configuração estiver ausente.
-- `src/contexts/AuthContext.tsx`: sessão, usuário, perfil, organização/filial escolhida, permissões e tratamento de erro.
-- `src/contexts/RequireAuth.tsx`: guard reutilizável para telas futuras.
-- `src/main.tsx`: adiciona `AuthProvider` sem substituir o dashboard.
-
-Não existe tela de login nesta etapa. O estado atual do dashboard não foi protegido para evitar fingir autenticação ou interromper a base visual. O fluxo de recuperação envia para `/auth/reset-password`, cuja tela/rota ainda precisa ser criada.
+A migration deliberadamente não permite INSERT/DELETE de associações, nem UPDATE de memberships, roles ou permissões pelo cliente autenticado. O provisionamento e alterações administrativas precisam de processo confiável no servidor. Nunca use a chave service role na aplicação React.
 
 ## Segurança e limitações
 
-- Todas as tabelas da migration têm RLS. As políticas leem dados no escopo da organização e, para filiais, exigem uma concessão explícita ou permissão `branches.read_all`.
-- Funções de autorização são `SECURITY DEFINER`, `STABLE`, usam `search_path` vazio e verificam `auth.uid()`; não há política que permita promover o próprio usuário. Escritas administrativas ficam bloqueadas no cliente nesta fase.
-- O contexto React melhora a UX, mas não é fronteira de segurança: as políticas PostgreSQL são a autoridade.
-- O perfil fica restrito ao próprio usuário; privilégios de escrita estão limitados às colunas de apresentação.
-- A sessão Supabase persiste no armazenamento padrão do SDK do navegador. Para Electron e modo offline, será necessário desenhar armazenamento seguro/bridge apropriado; não compartilhar tokens secretos nem assumir que localStorage é armazenamento seguro no desktop.
-- O dashboard atual ainda contém rótulos visuais como “Administrador” que são placeholders estáticos existentes, não identidade autenticada. Não os use para autorização.
-- Permissões não são semeadas nem atribuídas automaticamente; catálogo e provisionamento devem ser configurados por processo confiável.
+- Todas as tabelas da migration têm RLS. A leitura é autorizada conforme associação ativa e permissões; filiais exigem concessão explícita ou permissão `branches.read_all`.
+- Funções de autorização ficam no schema `private` não exposto, são `SECURITY DEFINER`, usam `search_path` vazio e consultam `auth.uid()`. Elas precisam ser chamadas pelas policies, mas não devem ser publicadas como RPC via PostgREST.
+- O cliente React é UX, não fronteira de segurança: as policies PostgreSQL são a autoridade.
+- Perfil só pode ser lido pelo próprio usuário; update limitado às colunas de apresentação.
+- A trigger cria perfil vazio para novos usuários, e migration backfill para usuários Auth preexistentes. Não cria associação a organização nem filial.
+- Permissões não são semeadas nem atribuídas automaticamente; o provisionamento confiável ainda precisa ser projetado.
+- O contexto React carrega permissões por consultas à tabela `role_permissions`, cuja leitura exige `roles.read`; ainda será necessário alinhar esse carregamento ao modelo final de permissão antes de conectar a interface de autorização.
+- A sessão usa persistência padrão do SDK no navegador. Electron/offline exige desenho separado de armazenamento seguro e sincronização.
+- O dashboard atual ainda contém rótulos visuais estáticos como “Administrador”; não são identidade autenticada nem autorização.
 
 ## Validação
 
-A alteração foi feita por commit remoto, sem terminal de execução nesta sessão. Assim, `npm install`, `npx tsc --noEmit`, build e execução da migration **não foram executados nem comprovados**. Execute localmente/Codespaces:
+A revisão é estática e o arquivo foi preparado para aprovação. Não houve conexão ao projeto Supabase, execução SQL, instalação npm ou execução dos comandos TypeScript/build nesta sessão. Execute localmente/Codespaces:
 
 ```bash
 npm install
@@ -71,4 +60,4 @@ npx tsc --noEmit
 npm run build
 ```
 
-Depois de instalar dependências, execute a migration no Supabase e teste o isolamento com usuários e organizações separados. Não considerar as políticas validadas até esses testes serem feitos.
+Não considerar RLS validado até aplicar em ambiente de teste e executar testes negativos/positivos com duas contas e duas organizações.

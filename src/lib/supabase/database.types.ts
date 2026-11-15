@@ -43,23 +43,19 @@ export interface Database {
       };
       role_permissions: {
         Row: { role_id: string; permission_id: string; created_at: string; updated_at: string };
-        Insert: { role_id: string; permission_id: string; created_at?: string; updated_at?: string };
+        Insert: { role_id: string; permission_id: string };
         Update: { updated_at?: string };
         Relationships: [];
       };
       branch_memberships: {
         Row: { id: string; organization_id: string; membership_id: string; branch_id: string; created_at: string; updated_at: string };
-        Insert: { id?: string; organization_id: string; membership_id: string; branch_id: string; created_at?: string; updated_at?: string };
+        Insert: { id?: string; organization_id: string; membership_id: string; branch_id: string };
         Update: { updated_at?: string };
         Relationships: [];
       };
     };
     Views: Record<string, never>;
-    Functions: {
-      is_organization_member: { Args: { p_organization_id: string }; Returns: boolean };
-      has_organization_permission: { Args: { p_organization_id: string; p_permission: string }; Returns: boolean };
-      can_access_branch: { Args: { p_branch_id: string; p_permission: string }; Returns: boolean };
-    };
+    Functions: Record<string, never>;
     Enums: { membership_status: MembershipStatus };
     CompositeTypes: Record<string, never>;
   };
